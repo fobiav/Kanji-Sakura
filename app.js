@@ -1,16 +1,30 @@
 /* Кандзи · сакура — основное приложение: справочник, карточка, добавление, правка, категории, настройки */
+
+/* Страховка: null / undefined / false не должны попадать в разметку текстом «null».
+   Браузерные append/replaceChildren превращают такие значения в строку, поэтому отфильтровываем их. */
+(function () {
+  ['append', 'prepend', 'replaceChildren', 'before', 'after'].forEach(name => {
+    const orig = Element.prototype[name];
+    Element.prototype[name] = function (...kids) {
+      return orig.apply(this, kids.flat(Infinity).filter(x => x != null && x !== false));
+    };
+  });
+})();
+
 const App = (function () {
   'use strict';
   const { esc, furigana, wordRuby } = Core;
   const LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1'];
-  const VERSION = '1.0';
+  const VERSION = '1.1';
 
+  const DEFAULTS = { furigana: true, strict: 'medium', view: 'brush', font: 'mincho', session: 20, onlyDue: true, lastBackup: 0, theme: 'light', flashSide: 'kanji' };
   const S = {
     cards: new Map(),
     cats: [],
-    settings: { furigana: true, strict: 'medium', view: 'brush', font: 'mincho', session: 20, onlyDue: true, lastBackup: 0 },
+    stats: { days: {} },
+    settings: Object.assign({}, DEFAULTS),
     tab: 'ref',
-    filter: { q: '', level: '', cat: '', study: false },
+    filter: { q: '', level: '', cat: '', study: false, learned: false },
     sel: null,
     limit: 300,
     nextOrder: 1
@@ -41,6 +55,7 @@ const App = (function () {
     book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5"/><path d="M9 8h7"/></svg>',
     cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="14" height="14" rx="3"/><path d="M7 3h11a3 3 0 0 1 3 3v11"/><path d="M8 13l2 2 4-4"/></svg>',
     tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="8" cy="8" r="1.4"/></svg>',
+    chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
     gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>',
     plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
     back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
@@ -101,6 +116,8 @@ const App = (function () {
     const wrap = h('div', { class: 'wrap' });
     const el = h('div', { class: 'screen' }, wrap);
     const entry = { el, wrap, onClose: null };
+    // Кнопка, по которой кликнули, остаётся в фокусе под новым экраном: Enter нажал бы её снова.
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     stack.push(entry);
     $('#overlay-root').append(el);
     history.pushState({ s: stack.length }, '');
@@ -128,6 +145,38 @@ const App = (function () {
   const saveCard = c => { S.cards.set(c.ch, c); return DB.putCard(c).catch(e => toast('Не удалось сохранить: ' + (e && e.message || e))); };
   const saveCats = () => DB.kvSet('cats', S.cats);
   const saveSettings = () => DB.kvSet('settings', S.settings);
+  const saveStats = () => DB.kvSet('stats', S.stats);
+
+  /* Журнал занятий по дням: сколько ответов и сколько из них верных (в целом и по режимам). */
+  function logActivity(mode, ok) {
+    const k = Core.dayKey();
+    const days = S.stats.days;
+    const d = days[k] || (days[k] = { n: 0, ok: 0, m: {} });
+    d.n++; if (ok) d.ok++;
+    const m = d.m[mode] || (d.m[mode] = { n: 0, ok: 0 });
+    m.n++; if (ok) m.ok++;
+    saveStats();
+  }
+  /* Ответ засчитан вручную («Засчитать как верно»): поправить сегодняшний журнал. */
+  function fixActivity(mode) {
+    const d = S.stats.days[Core.dayKey()];
+    if (!d || d.ok >= d.n) return;
+    d.ok++;
+    if (d.m[mode] && d.m[mode].ok < d.m[mode].n) d.m[mode].ok++;
+    saveStats();
+  }
+  function cleanStats(s) {
+    const out = { days: {} };
+    if (!s || typeof s.days !== 'object') return out;
+    for (const k of Object.keys(s.days)) {
+      const d = s.days[k];
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(k) || !d) continue;
+      const m = {};
+      for (const mk of Object.keys(d.m || {})) m[mk] = { n: +d.m[mk].n || 0, ok: +d.m[mk].ok || 0 };
+      out.days[k] = { n: +d.n || 0, ok: +d.ok || 0, m };
+    }
+    return out;
+  }
   const uid = () => Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
   const catName = id => { const c = S.cats.find(x => x.id === id); return c ? c.name : null; };
   const catCount = id => { let n = 0; S.cards.forEach(c => { if (c.cats.includes(id)) n++; }); return n; };
@@ -148,6 +197,7 @@ const App = (function () {
       level: LEVELS.includes(c.level) ? c.level : '',
       cats: strList(c.cats),
       study: !!c.study,
+      learned: !!c.learned,
       strokes: cleanStrokes(c.strokes),
       ru: String(c.ru || ''),
       en: strList(c.en),
@@ -264,7 +314,7 @@ const App = (function () {
   }
 
   /* ---------- Навигация и вкладки ---------- */
-  const TABS = [['ref', 'Справочник', 'book'], ['study', 'Учить', 'cards'], ['cats', 'Категории', 'tag'], ['settings', 'Настройки', 'gear']];
+  const TABS = [['ref', 'Справочник', 'book'], ['study', 'Учить', 'cards'], ['stats', 'Статистика', 'chart'], ['cats', 'Категории', 'tag'], ['settings', 'Настройки', 'gear']];
   function buildNav() {
     const nav = $('#nav');
     nav.replaceChildren(...TABS.map(([id, label, ic]) =>
@@ -278,7 +328,7 @@ const App = (function () {
     const main = $('#main');
     main.replaceChildren();
     window.scrollTo(0, 0);
-    ({ ref: buildRef, study: () => App.buildStudy(main), cats: buildCats, settings: buildSettings })[id](main);
+    ({ ref: buildRef, study: () => App.buildStudy(main), stats: () => App.buildStats(main), cats: buildCats, settings: buildSettings })[id](main);
   }
   function refresh() { showTab(S.tab); }
 
@@ -308,6 +358,7 @@ const App = (function () {
       if (f.level === 'none' ? c.level : (f.level && c.level !== f.level)) return;
       if (f.cat && !c.cats.includes(f.cat)) return;
       if (f.study && !c.study) return;
+      if (f.learned && !c.learned) return;
       if (!matchQuery(c, f.q)) return;
       arr.push(c);
     });
@@ -332,6 +383,7 @@ const App = (function () {
       h('header', { class: 'top' },
         h('div', { class: 'brand', html: LOGO }, h('div', {}, h('h1', {}, 'Кандзи'), h('small', {}, 'справочник и тренировка'))),
         h('div', { class: 'top-actions' },
+          h('button', { class: 'icon-btn green jp', lang: 'ja', 'aria-label': 'Ввести русские значения списком', title: 'Русские значения списком', onclick: openTranslate, style: 'font-size:20px;font-weight:600' }, '訳'),
           h('button', { class: 'icon-btn green', 'aria-label': 'Выбрать несколько', onclick: toggleSelect, html: ICON.select }),
           h('button', { class: 'icon-btn', style: 'background:var(--pink-d);color:#fff', 'aria-label': 'Добавить кандзи', onclick: openAdd, html: ICON.plus }))),
       search, chips, catChips, info, grid, more);
@@ -349,7 +401,8 @@ const App = (function () {
       mk('Все', !f.level, S.cards.size, () => setLevel('')),
       ...LEVELS.map(l => mk(l, f.level === l, counts[l] || 0, () => setLevel(f.level === l ? '' : l))),
       none ? mk('Без уровня', f.level === 'none', none, () => setLevel(f.level === 'none' ? '' : 'none')) : null,
-      mk('В заучивании', f.study, null, () => { f.study = !f.study; renderChips(); renderGrid(); }, 'g'));
+      mk('В заучивании', f.study, null, () => { f.study = !f.study; renderChips(); renderGrid(); }, 'g'),
+      mk('Выучено', f.learned, null, () => { f.learned = !f.learned; renderChips(); renderGrid(); }, 'g'));
     catChips.replaceChildren(...S.cats.map(c => mk(c.name, f.cat === c.id, catCount(c.id), () => { f.cat = f.cat === c.id ? '' : c.id; S.limit = 300; renderChips(); renderGrid(); }, 'g')));
     catChips.style.display = S.cats.length ? '' : 'none';
   }
@@ -367,7 +420,7 @@ const App = (function () {
       grid.replaceChildren();
       grid.style.display = 'block';
       grid.append(S.cards.size ? h('div', { class: 'empty' }, h('div', { class: 'big jp', lang: 'ja' }, '探'), h('h3', {}, 'Ничего не найдено'), h('p', {}, 'Попробуйте другой запрос или сбросьте фильтры.'),
-        h('button', { class: 'btn', onclick: () => { S.filter = { q: '', level: '', cat: '', study: false }; showTab('ref'); } }, 'Сбросить фильтры'))
+        h('button', { class: 'btn', onclick: () => { S.filter = { q: '', level: '', cat: '', study: false, learned: false }; showTab('ref'); } }, 'Сбросить фильтры'))
         : h('div', { class: 'empty' }, h('div', { class: 'big jp', lang: 'ja' }, '桜'), h('h3', {}, 'Пока пусто'),
           h('p', {}, 'Добавьте первые кандзи: можно один или сразу списком.'),
           h('button', { class: 'btn primary', onclick: openAdd }, 'Добавить кандзи')));
@@ -388,6 +441,7 @@ const App = (function () {
       S.sel ? h('span', { class: 'check', html: selected ? ICON.check : '' }) : (c.study ? h('span', { class: 'dot', title: 'В заучивании' }) : null),
       h('div', { class: 'ch', lang: 'ja' }, c.ch),
       h('div', { class: 'mn' }, meaning(c) || '—'),
+      c.learned ? h('span', { class: 'done', title: 'Выучено' }, '✓') : null,
       !c.strokes ? h('span', { class: 'warn', title: 'Нет начертания' }, '⚠') : null);
     if (S.sel) t.querySelector('.check').innerHTML = selected ? ICON.check : '';
     return t;
@@ -434,6 +488,90 @@ const App = (function () {
         S.sel = new Set(); toast('Удалено: ' + arr.length); renderChips(); renderGrid(); updateSelBar();
       } }
     ]);
+  }
+
+  /* ---------- Русские значения списком ---------- */
+  function openTranslate() {
+    const base = filteredCards();
+    if (!base.length) { toast('Сначала добавьте кандзи'); return; }
+    openScreen((wrap, entry) => {
+      const drafts = new Map();                 // ch -> введённый текст (только изменённые)
+      const anyEmpty = base.some(c => !c.ru);
+      let onlyEmpty = anyEmpty;
+      let shown = 60;
+      const rowsBox = h('div');
+      const more = h('div', { style: 'text-align:center;margin:14px 0' });
+      const info = h('div', { class: 'listinfo' });
+      const saveBtn = h('button', { class: 'btn primary small', onclick: () => save(true) }, 'Сохранить');
+
+      const list = () => base.filter(c => !onlyEmpty || !c.ru || drafts.has(c.ch));
+      const dirtyCount = () => drafts.size;
+      function paintSave() { saveBtn.textContent = dirtyCount() ? `Сохранить (${dirtyCount()})` : 'Сохранить'; }
+
+      function inputs() { return Array.from(rowsBox.querySelectorAll('input.tr-in')); }
+      function focusNext(inp, dir) {
+        const all = inputs(); const i = all.indexOf(inp); const nxt = all[i + dir];
+        if (nxt) { nxt.focus(); nxt.select(); nxt.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+        else if (dir > 0 && shown < list().length) { shown += 60; draw(); const a2 = inputs(); if (a2[i + 1]) a2[i + 1].focus(); }
+        else if (dir > 0) { inp.blur(); toast('Это последний кандзи в списке'); }
+      }
+      function row(c) {
+        const val = drafts.has(c.ch) ? drafts.get(c.ch) : c.ru;
+        const inp = h('input', { class: 'field tr-in', type: 'text', value: val, placeholder: 'русский перевод', autocomplete: 'off', enterkeyhint: 'next', 'aria-label': 'Русский перевод для ' + c.ch,
+          oninput: e => {
+            const v = e.target.value;
+            if (v.trim() === c.ru) drafts.delete(c.ch); else drafts.set(c.ch, v);
+            r.classList.toggle('dirty', drafts.has(c.ch)); paintSave();
+          },
+          onkeydown: e => {
+            if (e.key === 'Enter' || e.key === 'ArrowDown') { e.preventDefault(); focusNext(inp, e.shiftKey ? -1 : 1); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); focusNext(inp, -1); }
+          } });
+        const reads = [].concat(c.on, c.kun).map(x => x.replace(/[（(][^）)]*[）)]/g, '').replace(/[.\-]/g, '')).filter(Boolean).slice(0, 4).join(' · ');
+        const r = h('div', { class: 'tr-row' + (drafts.has(c.ch) ? ' dirty' : '') },
+          h('button', { class: 'tr-ch jp', lang: 'ja', 'aria-label': 'Открыть карточку ' + c.ch, onclick: () => openDetail(c.ch) }, c.ch),
+          h('div', { class: 'tr-body' },
+            h('div', { class: 'tr-en' }, c.en.length ? c.en.join(', ') : h('span', { class: 'muted' }, 'нет английского перевода')),
+            reads ? h('div', { class: 'tr-rd', lang: 'ja' }, reads) : null,
+            inp));
+        return r;
+      }
+      function draw() {
+        const l = list();
+        rowsBox.replaceChildren(...l.slice(0, shown).map(row));
+        more.replaceChildren(l.length > shown ? h('button', { class: 'btn', onclick: () => { shown += 60; draw(); } }, `Показать ещё (${l.length - shown})`) : null);
+        info.textContent = `Кандзи в списке: ${l.length}` + (S.filter.level || S.filter.cat || S.filter.q ? ' (по текущему фильтру справочника)' : '');
+        if (!l.length) rowsBox.append(h('div', { class: 'empty' }, h('h3', {}, 'Все значения заполнены'), h('p', {}, 'Выключите «Только без перевода», чтобы увидеть весь список.')));
+        paintSave();
+      }
+      async function save(stay) {
+        if (!drafts.size) { if (stay) toast('Нечего сохранять'); return; }
+        const changed = [];
+        drafts.forEach((v, ch) => { const c = S.cards.get(ch); if (c) { c.ru = v.trim(); changed.push(c); } });
+        const n = changed.length;
+        drafts.clear();
+        await DB.putCards(changed).catch(() => toast('Не удалось сохранить'));
+        toast('Сохранено: ' + n);
+        if (stay) { base.forEach(c => { const f = S.cards.get(c.ch); if (f) c.ru = f.ru; }); draw(); }
+      }
+      entry.onClose = () => { if (drafts.size) save(false); if (S.tab === 'ref') renderGrid(); };
+
+      wrap.append(
+        bar('Русские значения', null, saveBtn),
+        h('div', { class: 'card' },
+          h('p', { class: 'muted', style: 'margin:0 0 10px;font-size:14px' }, 'Впишите перевод и нажмите Enter (на телефоне «Далее»): курсор перейдёт к следующему кандзи. Сохранить можно кнопкой сверху; при выходе изменения сохранятся сами.'),
+          h('label', { class: 'row', style: 'padding:0;border:0' }, h('span', { class: 't' }, 'Только без перевода', h('small', {}, 'Скрыть те, где русский уже заполнен')),
+            h('span', { class: 'switch' }, h('input', { type: 'checkbox', checked: onlyEmpty, onchange: e => { onlyEmpty = e.target.checked; shown = 60; draw(); } })))),
+        info, rowsBox, more);
+      draw();
+      // Курсор в первую строку: только на компьютере и только если пользователь ещё никуда не нажал и не начал печатать
+      requestAnimationFrame(() => {
+        const f = rowsBox.querySelector('input.tr-in');
+        const a = document.activeElement;
+        const free = !a || a === document.body || !(a.matches && a.matches('input,textarea,select'));
+        if (f && free && !drafts.size && window.matchMedia('(hover:hover)').matches) f.focus({ preventScroll: true });
+      });
+    });
   }
 
   /* ---------- Карточка кандзи ---------- */
@@ -491,9 +629,13 @@ const App = (function () {
         wrap.append(viewer);
 
         // заучивание
-        wrap.append(h('div', { class: 'card' }, h('label', { class: 'row', style: 'padding:0;border:0' },
-          h('span', { class: 't' }, 'Флэш-карта для заучивания', h('small', {}, 'Кандзи попадёт в режимы «Чтение» и «Письмо»')),
-          h('span', { class: 'switch' }, h('input', { type: 'checkbox', checked: c.study, onchange: e => { c.study = e.target.checked; saveCard(c); toast(c.study ? 'Добавлено в заучивание' : 'Убрано из заучивания'); } })))));
+        wrap.append(h('div', { class: 'card' },
+          h('label', { class: 'row' },
+            h('span', { class: 't' }, 'Флэш-карта для заучивания', h('small', {}, 'Кандзи попадёт в режимы «Чтение», «Письмо» и «Карточки»')),
+            h('span', { class: 'switch' }, h('input', { type: 'checkbox', checked: c.study, onchange: e => { c.study = e.target.checked; saveCard(c); toast(c.study ? 'Добавлено в заучивание' : 'Убрано из заучивания'); } }))),
+          h('label', { class: 'row' },
+            h('span', { class: 't' }, 'Выучено', h('small', {}, 'Отмечается и в режиме «Карточки». Выученные не показываются в колоде «Не выученные»')),
+            h('span', { class: 'switch' }, h('input', { type: 'checkbox', checked: c.learned, onchange: e => { c.learned = e.target.checked; saveCard(c); toast(c.learned ? 'Отмечено как выученное' : 'Снята отметка «выучено»'); } })))));
 
         // значения
         const mean = c.ru || (c.en || []).join(', ');
@@ -779,11 +921,17 @@ const App = (function () {
   function applySettings() {
     document.body.classList.toggle('no-furi', !S.settings.furigana);
     document.body.classList.toggle('f-gothic', S.settings.font === 'gothic');
+    const theme = ['light', 'dark', 'auto'].includes(S.settings.theme) ? S.settings.theme : 'light';
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('ks-theme', theme); } catch (_) {}
+    const dark = theme === 'dark' || (theme === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+    const tc = document.getElementById('tc');
+    if (tc) tc.setAttribute('content', dark ? '#231c1f' : '#fcf5f6');
   }
   const fmtDate = ts => new Date(ts).toLocaleString('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 
   function exportBackup() {
-    const data = { app: 'kanji-sakura', version: 1, exported: new Date().toISOString(), settings: S.settings, cats: S.cats, cards: Array.from(S.cards.values()) };
+    const data = { app: 'kanji-sakura', version: 2, exported: new Date().toISOString(), settings: S.settings, cats: S.cats, stats: S.stats, cards: Array.from(S.cards.values()) };
     const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = h('a', { href: url, download: 'kanji-sakura-' + new Date().toISOString().slice(0, 10) + '.json' });
@@ -802,21 +950,23 @@ const App = (function () {
     await DB.clearAll();
     S.cards = new Map(cards.map(c => [c.ch, c]));
     S.cats = Array.isArray(data.cats) ? data.cats.filter(k => k && k.id && k.name).map(k => ({ id: String(k.id), name: String(k.name) })) : [];
-    Object.assign(S.settings, data.settings || {});
+    S.settings = Object.assign({}, DEFAULTS, data.settings || {});
+    S.stats = cleanStats(data.stats);
     S.nextOrder = cards.reduce((m, c) => Math.max(m, c.order), 0) + 1;
-    await DB.putCards(cards); await saveCats(); await saveSettings();
-    applySettings(); S.filter = { q: '', level: '', cat: '', study: false };
+    await DB.putCards(cards); await saveCats(); await saveSettings(); await saveStats();
+    applySettings(); S.filter = { q: '', level: '', cat: '', study: false, learned: false };
     toast('Данные восстановлены: ' + cards.length); refresh();
   }
 
   function buildSettings(main) {
     const st = S.settings;
-    const sel = (key, opts, cb) => { const s = h('select', { class: 'field', style: 'width:auto;min-width:130px', onchange: e => { st[key] = isNaN(+e.target.value) ? e.target.value : +e.target.value; saveSettings(); applySettings(); if (cb) cb(); } }, opts.map(([v, l]) => h('option', { value: v }, l))); s.value = st[key]; return s; };
+    const sel = (key, opts, cb) => { const s = h('select', { class: 'field', style: 'width:auto;min-width:130px', onchange: e => { st[key] = (e.target.value !== '' && !isNaN(+e.target.value)) ? +e.target.value : e.target.value; saveSettings(); applySettings(); if (cb) cb(); } }, opts.map(([v, l]) => h('option', { value: v }, l))); s.value = st[key]; return s; };
     const fileIn = h('input', { type: 'file', accept: '.json,application/json', hidden: true, onchange: e => { if (e.target.files[0]) importBackup(e.target.files[0]); e.target.value = ''; } });
     const noStroke = Array.from(S.cards.values()).filter(c => !c.strokes);
     main.append(
       h('header', { class: 'top' }, h('div', { class: 'brand', html: LOGO }, h('div', {}, h('h1', {}, 'Настройки'), h('small', {}, 'версия ' + VERSION)))),
       h('div', { class: 'card' }, h('h3', {}, 'Вид'),
+        h('div', { class: 'row' }, h('span', { class: 't' }, 'Тема', h('small', {}, 'Светлая, тёмная или как на телефоне')), sel('theme', [['light', 'Светлая'], ['dark', 'Тёмная'], ['auto', 'Как в системе']])),
         h('div', { class: 'row' }, h('span', { class: 't' }, 'Фуригана', h('small', {}, 'Чтение маленькой кана над кандзи в словах и предложениях')),
           h('span', { class: 'switch' }, h('input', { type: 'checkbox', checked: st.furigana, onchange: e => { st.furigana = e.target.checked; saveSettings(); applySettings(); } }))),
         h('div', { class: 'row' }, h('span', { class: 't' }, 'Кандзи в карточке'), sel('view', [['brush', 'Кисть'], ['print', 'Печатный']])),
@@ -824,7 +974,7 @@ const App = (function () {
       h('div', { class: 'card' }, h('h3', {}, 'Заучивание'),
         h('div', { class: 'row' }, h('span', { class: 't' }, 'Проверка письма', h('small', {}, 'Насколько точно должны совпасть черты')), sel('strict', [['soft', 'Мягкая'], ['medium', 'Средняя'], ['strict', 'Строгая']])),
         h('div', { class: 'row' }, h('span', { class: 't' }, 'Карточек за занятие'), sel('session', [[10, '10'], [20, '20'], [30, '30'], [50, '50']])),
-        h('div', { class: 'row' }, h('span', { class: 't' }, 'Только к повторению', h('small', {}, 'Показывать то, что пора повторить')),
+        h('div', { class: 'row' }, h('span', { class: 't' }, 'Только то, что пора повторить', h('small', {}, 'Новые карточки и те, у которых подошёл срок. Выключите, чтобы заниматься всем подряд')),
           h('span', { class: 'switch' }, h('input', { type: 'checkbox', checked: st.onlyDue, onchange: e => { st.onlyDue = e.target.checked; saveSettings(); } })))),
       h('div', { class: 'card' }, h('h3', {}, 'Резервная копия'),
         h('p', { class: 'muted', style: 'margin:0 0 10px;font-size:14px' }, 'Все кандзи, ваши правки, категории и прогресс хранятся на этом устройстве. Сохраняйте копию время от времени. Файл можно загрузить на другое устройство.'),
@@ -841,8 +991,8 @@ const App = (function () {
         } }, 'Догрузить недостающие начертания') : null,
         h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn danger small', onclick: async () => {
           if (!(await confirmSheet('Стереть все кандзи, категории и прогресс на этом устройстве? Это нельзя отменить. Сначала сохраните копию.', 'Стереть всё', true))) return;
-          await DB.clearAll(); S.cards = new Map(); S.cats = []; S.nextOrder = 1; S.filter = { q: '', level: '', cat: '', study: false };
-          S.settings = Object.assign({}, { furigana: true, strict: 'medium', view: 'brush', font: 'mincho', session: 20, onlyDue: true, lastBackup: 0 });
+          await DB.clearAll(); S.cards = new Map(); S.cats = []; S.stats = { days: {} }; S.nextOrder = 1; S.filter = { q: '', level: '', cat: '', study: false, learned: false };
+          S.settings = Object.assign({}, DEFAULTS);
           await saveSettings(); applySettings(); toast('Всё стёрто'); refresh();
         } }, 'Стереть все данные'))),
       h('div', { class: 'card' }, h('h3', {}, 'О приложении'),
@@ -854,10 +1004,11 @@ const App = (function () {
   async function init() {
     await DB.open();
     try {
-      const [cards, cats, settings] = await Promise.all([DB.allCards(), DB.kvGet('cats'), DB.kvGet('settings')]);
+      const [cards, cats, settings, stats] = await Promise.all([DB.allCards(), DB.kvGet('cats'), DB.kvGet('settings'), DB.kvGet('stats')]);
       (cards || []).map(normalizeCard).filter(Boolean).forEach(c => S.cards.set(c.ch, c));
       S.cats = Array.isArray(cats) ? cats : [];
       Object.assign(S.settings, settings || {});
+      S.stats = cleanStats(stats);
     } catch (e) { toast('Не удалось прочитать данные'); }
     S.nextOrder = Array.from(S.cards.values()).reduce((m, c) => Math.max(m, c.order), 0) + 1;
     applySettings();
@@ -870,6 +1021,6 @@ const App = (function () {
 
   return {
     S, h, ICON, LOGO, LEVELS, init, toast, sheet, confirmSheet, pickSheet, openScreen, closeScreen, bar, saveCard, meaning,
-    strokeSvg, readingChip, openDetail, showTab, refresh, catName, plural, pool
+    strokeSvg, readingChip, openDetail, showTab, refresh, catName, plural, pool, logActivity, fixActivity
   };
 })();

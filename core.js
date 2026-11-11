@@ -312,10 +312,41 @@
   function isDue(state, now) { return !state || state.due <= now; }
   function review(state, correct, now) {
     const box = correct ? Math.min((state ? state.box : 0) + 1, INTERVALS_DAYS.length - 1) : 0;
-    return { box, due: now + INTERVALS_DAYS[box] * 86400000, last: now, ok: correct ? 1 : 0 };
+    return {
+      box, due: now + INTERVALS_DAYS[box] * 86400000, last: now, ok: correct ? 1 : 0,
+      n: ((state && state.n) || 0) + 1, right: ((state && state.right) || 0) + (correct ? 1 : 0)
+    };
+  }
+
+  /* ---------- Дни занятий и серия (стрик) ---------- */
+  const pad2 = n => (n < 10 ? '0' : '') + n;
+  function dayKey(d) { d = d || new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+  function shiftDay(key, delta) {
+    const [y, m, d] = key.split('-').map(Number);
+    return dayKey(new Date(y, m - 1, d + delta, 12));
+  }
+  const active = (days, k) => !!(days && days[k] && days[k].n > 0);
+  /* current — длина серии; если сегодня ещё не занимались, серия не сгорает до конца дня. */
+  function streak(days, today) {
+    today = today || dayKey();
+    const doneToday = active(days, today);
+    let k = doneToday ? today : shiftDay(today, -1), n = 0;
+    while (active(days, k)) { n++; k = shiftDay(k, -1); }
+    return { current: n, doneToday };
+  }
+  function bestStreak(days) {
+    const keys = Object.keys(days || {}).filter(k => active(days, k)).sort();
+    let best = 0, run = 0, prev = null;
+    for (const k of keys) {
+      run = prev && shiftDay(prev, 1) === k ? run + 1 : 1;
+      if (run > best) best = run;
+      prev = k;
+    }
+    return best;
   }
 
   const api = {
+    dayKey, shiftDay, streak, bestStreak,
     esc, isKanji, kanjiList, flatten, strokeStart, pathLength, resample, parseKanjiVG, compare,
     kata2hira, hira2kata, romajiToHira, normReading, acceptedReadings, furigana, wordRuby,
     INTERVALS_DAYS, isDue, review

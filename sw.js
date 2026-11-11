@@ -1,7 +1,7 @@
 /* Service worker: оболочка приложения работает офлайн. Данные кандзи лежат в IndexedDB. */
-const VERSION = 'kanji-sakura-v1';
+const VERSION = 'kanji-sakura-v2';
 const SHELL = [
-  './', './index.html', './style.css', './core.js', './db.js', './app.js', './study.js', './manifest.json',
+  './', './index.html', './style.css', './core.js', './db.js', './app.js', './study.js', './stats.js', './manifest.json',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'
 ];
 

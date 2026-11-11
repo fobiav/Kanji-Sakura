@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Кандзи · сакура</title>
+<meta name="theme-color" content="#fcf5f6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#241d20" media="(prefers-color-scheme: dark)">
+<meta name="description" content="Справочник и тренировка японских кандзи: порядок черт, чтения, слова, письмо.">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <main id="main"></main>
+  <div id="selbar" class="selbar" hidden></div>
+  <nav id="nav" class="nav" aria-label="Разделы"></nav>
+</div>
+<div id="overlay-root"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="core.js"></script>
+<script src="db.js"></script>
+<script src="app.js"></script>
+<script src="study.js"></script>
+<script>App.init();</script>
+</body>
+</html>

@@ -65,6 +65,77 @@
     d.lines.length ? h('ul', { class: 'fb' }, d.lines.map(l => h('li', {}, l))) : null,
     h('div', { class: 'muted', style: 'font-size:13px;margin-top:6px' }, 'Зелёное — образец, ваши черты наложены на него: розовые — неверные.'));
 
+  /* ---------- Кандзи дня ---------- */
+  const KIND_NAMES = { write: 'письмо', kun: 'кунное чтение', on: 'онное чтение' };
+  const KIND_SHORT = { write: 'письмо', kun: 'кун', on: 'он' };
+  function dailySteps(c) {
+    const st = [];
+    if (c.strokes) st.push('write');
+    if (Core.acceptedReadings(c.kun, 'kun').size) st.push('kun');
+    if (Core.acceptedReadings(c.on, 'on').size) st.push('on');
+    return st;
+  }
+  const dailyPool = () => { const out = []; S.cards.forEach(c => { if (c.study && dailySteps(c).length) out.push(c); }); return out; };
+  /* Набор на сегодня: выбирается один раз за день и хранится, чтобы не менялся при каждом заходе. */
+  function ensureDaily(force) {
+    const today = Core.dayKey(), d = S.daily;
+    if (!force && d && d.day === today) {
+      const ids = d.ids.filter(ch => { const c = S.cards.get(ch); return c && dailySteps(c).length; });
+      if (ids.length) { if (ids.length !== d.ids.length) { d.ids = ids; App.saveDaily(); } return d; }
+    }
+    const pool = dailyPool();
+    if (!pool.length) { S.daily = null; return null; }
+    const ids = Core.pickDaily(pool, S.settings.dailyCount || 5, Math.random, force && d ? d.ids : []);
+    S.daily = { day: today, ids, done: {} };
+    App.saveDaily();
+    return S.daily;
+  }
+  function dailyPending(d) {
+    const plan = [];
+    d.ids.forEach(ch => {
+      const c = S.cards.get(ch); if (!c) return;
+      dailySteps(c).forEach(k => { if (((d.done[ch] || {})[k]) === undefined) plan.push({ ch, kind: k }); });
+    });
+    return plan;
+  }
+  function dailyTotals(d) {
+    let total = 0, done = 0, ok = 0;
+    d.ids.forEach(ch => {
+      const c = S.cards.get(ch); if (!c) return;
+      dailySteps(c).forEach(k => { total++; const v = (d.done[ch] || {})[k]; if (v !== undefined) { done++; if (v) ok++; } });
+    });
+    return { total, done, ok };
+  }
+  function startDaily(d, restart) {
+    if (restart) d.done = {};
+    const plan = dailyPending(d);
+    if (!plan.length) return;
+    App.saveDaily();
+    runSession('write', [], { plan, order: d.ids, onItem: (ch, kind, ok) => { (d.done[ch] = d.done[ch] || {})[kind] = ok; App.saveDaily(); } });
+  }
+  function dailySummary() {
+    const d = S.daily, t = dailyTotals(d);
+    const rows = d.ids.map(ch => {
+      const c = S.cards.get(ch); if (!c) return null;
+      const st = d.done[ch] || {};
+      const steps = dailySteps(c);
+      const wrongRead = steps.filter(k => k !== 'write' && st[k] === false);
+      return h('div', { class: 'dsum-row' },
+        h('button', { class: 'tr-ch jp', lang: 'ja', 'aria-label': 'Открыть карточку ' + ch, onclick: () => App.openDetail(ch) }, ch),
+        h('div', { class: 'tr-body' },
+          h('div', { class: 'tr-en' }, App.meaning(c) || '—'),
+          h('div', { class: 'dchips' }, steps.map(k => h('span', { class: 'dchip ' + (st[k] === true ? 'good' : st[k] === false ? 'bad' : '') }, (st[k] === true ? '✓ ' : st[k] === false ? '✗ ' : '· ') + KIND_SHORT[k]))),
+          wrongRead.length ? h('div', { class: 'dfix', lang: 'ja' }, wrongRead.map(k => h('div', {}, h('span', { class: 'muted', lang: 'ru' }, KIND_SHORT[k] + ': '), (k === 'on' ? c.on : c.kun).map(r => r.replace(/[（(][^）)]*[）)]/g, '').replace(/\./g, '')).join(' · ')))) : null));
+    });
+    return h('div', {},
+      h('div', { class: 'score' }, `${t.ok} из ${t.total}`),
+      h('div', { class: 'q-hint' }, t.ok === t.total ? 'Кандзи дня пройдены без единой ошибки' : 'Кандзи дня пройдены · верных заданий'),
+      streakLine(),
+      h('div', { class: 'card' }, h('h3', {}, 'Итоги по кандзи'), rows),
+      h('p', { class: 'muted', style: 'font-size:13px;text-align:center' }, 'Ошибки учтены: такие кандзи будут чаще попадаться в следующие дни.'),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: App.closeScreen }, 'Готово')));
+  }
+
   /* ---------- Вкладка ---------- */
   App.buildStudy = function (main) {
     const box = h('div');
@@ -96,6 +167,7 @@
       }
       const mk = (label, on, fn, cls) => h('button', { class: 'chip ' + (cls || '') + (on ? ' on' : ''), onclick: fn }, label);
       box.append(
+        dailyCard(),
         h('div', { class: 'chips' }, mk('Все уровни', !filt.level, () => { filt.level = ''; draw(); }), ...LEVELS.map(l => mk(l, filt.level === l, () => { filt.level = filt.level === l ? '' : l; draw(); }))),
         S.cats.length ? h('div', { class: 'chips' }, ...S.cats.map(k => mk(k.name, filt.cat === k.id, () => { filt.cat = filt.cat === k.id ? '' : k.id; draw(); }, 'g'))) : null,
         h('div', { class: 'row', style: 'margin:4px 0 8px;border:0' },
@@ -117,6 +189,35 @@
             all.length ? h('span', { class: 'due' + (due ? '' : ' zero') }, due ? due + ' к повтору' : 'всё повторено') : null);
         })),
         h('p', { class: 'muted', style: 'font-size:13px' }, `В заучивании: ${total}. Правильные ответы отодвигают повтор (1, 3, 7, 14, 30, 60 дней), ошибка возвращает карточку в начало.`));
+    }
+
+    function dailyCard() {
+      const d = ensureDaily(false);
+      if (!d) return h('div', { class: 'card daily' }, h('h3', {}, 'Кандзи дня'),
+        h('p', { class: 'muted', style: 'margin:0' }, 'Каждый день здесь будут выбираться несколько кандзи из заучивания, с упором на трудные: нужно написать их и ответить про кунное и онное чтения. Добавьте в заучивание кандзи с чтениями или начертанием.'));
+      const t = dailyTotals(d);
+      const label = t.done === 0 ? 'Начать' : t.done < t.total ? 'Продолжить' : 'Повторить';
+      return h('div', { class: 'card daily' },
+        h('div', { class: 'daily-head' }, h('h3', { style: 'margin:0' }, 'Кандзи дня'), h('span', { class: 'muted' }, t.done >= t.total ? `верно ${t.ok} из ${t.total}` : `выполнено ${t.done} из ${t.total}`)),
+        h('div', { class: 'dtiles' }, d.ids.map(ch => {
+          const c = S.cards.get(ch); if (!c) return null;
+          const st = d.done[ch] || {}, steps = dailySteps(c);
+          const fin = steps.every(k => st[k] !== undefined), allOk = steps.every(k => st[k] === true);
+          const hard = Core.difficulty(c).wrong >= Core.HARD_WRONG;
+          return h('button', { class: 'dtile' + (fin ? (allOk ? ' ok' : ' bad') : ''), 'aria-label': 'Открыть карточку ' + ch, onclick: () => App.openDetail(ch) },
+            h('span', { class: 'ch', lang: 'ja' }, ch),
+            h('small', {}, fin ? (allOk ? '✓ верно' : 'есть ошибки') : (hard ? 'трудный' : '\u00a0')));
+        })),
+        h('p', { class: 'muted', style: 'font-size:13px;margin:8px 0 0' }, 'По каждому: написать кандзи, затем кунное и онное чтения. Чаще выпадают те, где вы ошибались или нажимали «не знаю».'),
+        h('div', { class: 'actions', style: 'justify-content:flex-start;margin:12px 0 0' },
+          h('button', { class: 'btn primary', onclick: () => startDaily(d, t.done >= t.total) }, label),
+          h('button', { class: 'btn ghost small', onclick: reroll }, 'Другие кандзи')));
+    }
+    async function reroll() {
+      const d = S.daily;
+      if (dailyPool().length <= (S.settings.dailyCount || 5)) { App.toast('Других кандзи пока нет: в заучивании их немного'); return; }
+      if (d && dailyTotals(d).done > 0 && !(await App.confirmSheet('Сменить набор? Результаты за сегодня в этом наборе сбросятся (в статистике они останутся).', 'Сменить'))) return;
+      ensureDaily(true); draw();
     }
 
     function start(mode) {
@@ -171,12 +272,15 @@
   };
 
   /* ---------- Сессия: чтение и письмо ---------- */
-  function runSession(mode, ids) {
-    const meta = MODES.find(m => m.id === mode);
+  function runSession(mode, ids, opts) {
+    const daily = !!(opts && opts.plan);        // «Кандзи дня»: план шагов [{ch, kind}], без повторов после ошибки
+    const meta = daily ? { title: 'Кандзи дня' } : MODES.find(m => m.id === mode);
     App.openScreen((wrap, entry) => {
-      const queue = ids.slice();
-      const first = {};           // результат с первой попытки: ch -> bool
+      const queue = daily ? opts.plan.map(p => p.kind + '|' + p.ch) : ids.slice();
+      const first = {};           // результат с первой попытки: ключ шага -> bool
       const retried = new Set();
+      const itemOf = k => daily ? { kind: k.slice(0, k.indexOf('|')), ch: k.slice(k.indexOf('|') + 1) } : { kind: mode, ch: k };
+      let curMode = mode, curKey = '';
       let idx = 0;
       const keys = keyBinder();
       const progI = h('i');
@@ -188,9 +292,10 @@
       entry.onClose = () => { keys.destroy(); if (App.refreshStudy && S.tab === 'study') App.refreshStudy(); };
 
       function record(c, ok, prev) {
-        c.srs[mode] = Core.review(prev, ok, Date.now());
+        c.srs[curMode] = Core.review(prev, ok, Date.now());
         App.saveCard(c);
-        App.logActivity(mode, ok);
+        App.logActivity(curMode, ok);
+        if (daily) opts.onItem(c.ch, curMode, ok);
       }
       function advance() { idx++; next(); }
       function next() {
@@ -198,30 +303,33 @@
         progI.style.width = (100 * Math.min(idx, queue.length) / Math.max(queue.length, 1)) + '%';
         cnt.textContent = Math.min(idx + 1, queue.length) + ' / ' + queue.length;
         if (idx >= queue.length) return summary();
-        const c = S.cards.get(queue[idx]);
+        const item = itemOf(queue[idx]);
+        curKey = queue[idx]; curMode = item.kind;
+        const c = S.cards.get(item.ch);
         if (!c) return advance();
         body.replaceChildren();
         window.scrollTo(0, 0); entry.el.scrollTop = 0;
-        if (mode === 'write') writeCard(c); else readCard(c);
+        if (curMode === 'write') writeCard(c); else readCard(c);
+        if (daily) body.prepend(h('div', { class: 'daily-tag' }, `Кандзи дня · ${opts.order.indexOf(c.ch) + 1} из ${opts.order.length} · ${KIND_NAMES[curMode]}`));
       }
       function onResult(c, ok, prev) {
-        const ch = c.ch;
-        if (!(ch in first)) first[ch] = ok;
-        if (!retried.has(ch)) record(c, ok, prev);
-        if (!ok && !retried.has(ch)) { retried.add(ch); queue.push(ch); }
+        const key = curKey;
+        if (!(key in first)) first[key] = ok;
+        if (!retried.has(key)) record(c, ok, prev);
+        if (!daily && !ok && !retried.has(key)) { retried.add(key); queue.push(key); }
       }
 
       /* ----- Чтение ----- */
       function readCard(c) {
-        const kind = mode;
-        const prev = c.srs[mode];
+        const kind = curMode, key = curKey;
+        const prev = c.srs[kind];
         const accepted = Core.acceptedReadings(kind === 'on' ? c.on : c.kun, kind);
         const inp = h('input', { class: 'field ans-input', type: 'text', lang: 'ja', autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', placeholder: 'ответ (кана или ромадзи)', enterkeyhint: 'done' });
         const prevKana = h('div', { class: 'kana-prev', lang: 'ja' });
         const resBox = h('div');
         const actions = h('div', { class: 'actions' });
         let answered = false;
-        const firstTry = !(c.ch in first);
+        const firstTry = !(key in first);
 
         inp.addEventListener('input', () => { const v = inp.value; prevKana.textContent = /[a-zA-Z'-]/.test(v) ? Core.romajiToHira(v, false) : ''; });
         inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); answered ? advance() : check(); } });
@@ -240,11 +348,12 @@
         }
         function override() {
           if (firstTry) {
-            first[c.ch] = true;
-            c.srs[mode] = Core.review(prev, true, Date.now()); App.saveCard(c);
-            App.fixActivity(mode);
-            const k = queue.lastIndexOf(c.ch); if (k > idx) queue.splice(k, 1);
-            retried.delete(c.ch);
+            first[key] = true;
+            c.srs[kind] = Core.review(prev, true, Date.now()); App.saveCard(c);
+            App.fixActivity(kind);
+            const k = queue.lastIndexOf(key); if (k > idx) queue.splice(k, 1);
+            retried.delete(key);
+            if (daily) opts.onItem(c.ch, kind, true);
           }
           App.toast('Засчитано'); advance();
         }
@@ -273,7 +382,8 @@
       function writeCard(c) {
         const prev = c.srs.write;
         const refD = c.strokes.map(s => s.d);
-        const firstTry = !(c.ch in first);
+        const key = curKey;
+        const firstTry = !(key in first);
         let recorded = false, checked = false, lastOk = false;
         const pad = makePad(refD);
         const fb = h('div');
@@ -302,9 +412,10 @@
             !d.ok ? h('button', { class: 'btn', onclick: retry }, 'Попробовать ещё раз') : null,
             !d.ok ? h('button', { class: 'btn ghost', onclick: () => App.openDetail(c.ch) }, 'Смотреть порядок черт') : null,
             !d.ok && firstTry && recorded ? h('button', { class: 'btn green', onclick: () => {
-              first[c.ch] = true; c.srs.write = Core.review(prev, true, Date.now()); App.saveCard(c); App.fixActivity('write');
-              const k = queue.lastIndexOf(c.ch); if (k > idx) queue.splice(k, 1);
-              retried.delete(c.ch); App.toast('Засчитано'); advance(); } }, 'Засчитать как верно') : null,
+              first[key] = true; c.srs.write = Core.review(prev, true, Date.now()); App.saveCard(c); App.fixActivity('write');
+              const k = queue.lastIndexOf(key); if (k > idx) queue.splice(k, 1);
+              retried.delete(key); if (daily) opts.onItem(c.ch, 'write', true);
+              App.toast('Засчитано'); advance(); } }, 'Засчитать как верно') : null,
             h('button', { class: 'btn primary', onclick: advance }, 'Дальше'));
         }
         renderActions();
@@ -317,7 +428,8 @@
           else if (e.key === 'Enter' && !onButton(e)) { e.preventDefault(); if (!checked) check(); else if (lastOk) advance(); else retry(); }
         });
 
-        const readings = [].concat(c.on, c.kun).map(r => r.replace(/[（(][^）)]*[）)]/g, '').replace(/[.\-]/g, '')).filter(Boolean);
+        // в «Кандзи дня» чтения не подсказываем: про них спросят следующими вопросами
+        const readings = daily ? [] : [].concat(c.on, c.kun).map(r => r.replace(/[（(][^）)]*[）)]/g, '').replace(/[.\-]/g, '')).filter(Boolean);
         body.append(
           h('div', { class: 'q-label' }, 'Напишите кандзи'),
           h('div', { class: 'q-hint', style: 'font-size:18px;color:var(--ink)' }, App.meaning(c) || '—'),
@@ -333,6 +445,8 @@
       function summary() {
         keys.clear();
         body.replaceChildren();
+        cnt.textContent = '';
+        if (daily) { body.append(dailySummary()); return; }
         const keysArr = Object.keys(first);
         const good = keysArr.filter(k => first[k]).length;
         const bad = keysArr.filter(k => !first[k]);

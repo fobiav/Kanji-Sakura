@@ -310,11 +310,18 @@
   /* ---------- Интервальное повторение ---------- */
   const INTERVALS_DAYS = [0, 1, 3, 7, 14, 30, 60];
   function isDue(state, now) { return !state || state.due <= now; }
+  /* Счётчики ответов. У состояний из версии 1.1 их не было: последний результат (ok) считаем одним ответом. */
+  function counts(state) {
+    if (!state) return { n: 0, right: 0 };
+    if (typeof state.n === 'number') return { n: state.n, right: Math.min(state.right || 0, state.n) };
+    return state.last ? { n: 1, right: state.ok ? 1 : 0 } : { n: 0, right: 0 };
+  }
   function review(state, correct, now) {
     const box = correct ? Math.min((state ? state.box : 0) + 1, INTERVALS_DAYS.length - 1) : 0;
+    const c = counts(state);
     return {
       box, due: now + INTERVALS_DAYS[box] * 86400000, last: now, ok: correct ? 1 : 0,
-      n: ((state && state.n) || 0) + 1, right: ((state && state.right) || 0) + (correct ? 1 : 0)
+      n: c.n + 1, right: c.right + (correct ? 1 : 0)
     };
   }
 
@@ -345,7 +352,55 @@
     return best;
   }
 
+  /* ---------- Кандзи дня: «трудность» и выбор набора ---------- */
+  const DIFF_MODES = ['on', 'kun', 'write', 'card'];
+  /* wrong — сколько раз за всё время ответили неверно или нажали «не знаю» (по всем режимам). */
+  function difficulty(card) {
+    let n = 0, right = 0;
+    for (const m of DIFF_MODES) {
+      const c = counts(card && card.srs && card.srs[m]);
+      n += c.n; right += c.right;
+    }
+    return { n, wrong: n - right };
+  }
+  const HARD_WRONG = 2; // с этого числа ошибок кандзи считается трудным
+
+  /* Взвешенный выбор без повторов. Трудные кандзи (ошибок >= 2) занимают не меньше ~60% набора, если их хватает;
+     остальные места — случайно, но чем больше ошибок, тем выше шанс. rnd — функция 0..1 (для тестов). */
+  function pickDaily(cards, count, rnd, exclude) {
+    rnd = rnd || Math.random;
+    const skip = new Set(exclude || []);
+    let pool = cards.filter(c => !skip.has(c.ch));
+    if (pool.length < count) pool = cards.slice();           // мало кандзи: берём, что есть, даже если выпадут повторно
+    const info = new Map(pool.map(c => [c.ch, difficulty(c)]));
+    const weight = c => {
+      const d = info.get(c.ch);
+      return (1 + 3 * Math.min(d.wrong, 8) + (d.n === 0 ? 1 : 0)) * (c.learned && d.wrong === 0 ? 0.5 : 1);
+    };
+    const draw = (list, k, out) => {
+      const rest = list.slice();
+      while (out.length < k && rest.length) {
+        let total = 0; for (const c of rest) total += weight(c);
+        let r = rnd() * total, i = 0;
+        for (; i < rest.length - 1; i++) { r -= weight(rest[i]); if (r < 0) break; }
+        out.push(rest.splice(i, 1)[0]);
+      }
+      return rest;
+    };
+    const take = Math.min(count, pool.length);
+    const out = [];
+    const hard = pool.filter(c => info.get(c.ch).wrong >= HARD_WRONG);
+    const quota = Math.min(hard.length, Math.ceil(take * 0.6));
+    draw(hard, quota, out);
+    const chosen = new Set(out.map(c => c.ch));
+    draw(pool.filter(c => !chosen.has(c.ch)), take, out);
+    // порядок показа перемешиваем, чтобы трудные не шли всегда первыми
+    for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [out[i], out[j]] = [out[j], out[i]]; }
+    return out.map(c => c.ch);
+  }
+
   const api = {
+    difficulty, pickDaily, HARD_WRONG,
     dayKey, shiftDay, streak, bestStreak,
     esc, isKanji, kanjiList, flatten, strokeStart, pathLength, resample, parseKanjiVG, compare,
     kata2hira, hira2kata, romajiToHira, normReading, acceptedReadings, furigana, wordRuby,

@@ -15,13 +15,14 @@ const App = (function () {
   'use strict';
   const { esc, furigana, wordRuby } = Core;
   const LEVELS = ['N5', 'N4', 'N3', 'N2', 'N1'];
-  const VERSION = '1.1';
+  const VERSION = '1.2';
 
-  const DEFAULTS = { furigana: true, strict: 'medium', view: 'brush', font: 'mincho', session: 20, onlyDue: true, lastBackup: 0, theme: 'light', flashSide: 'kanji' };
+  const DEFAULTS = { furigana: true, strict: 'medium', view: 'brush', font: 'mincho', session: 20, onlyDue: true, lastBackup: 0, theme: 'light', flashSide: 'kanji', dailyCount: 5 };
   const S = {
     cards: new Map(),
     cats: [],
     stats: { days: {} },
+    daily: null,                 // набор «Кандзи дня»: { day, ids, done: { ch: { write, kun, on } } }
     settings: Object.assign({}, DEFAULTS),
     tab: 'ref',
     filter: { q: '', level: '', cat: '', study: false, learned: false },
@@ -146,6 +147,17 @@ const App = (function () {
   const saveCats = () => DB.kvSet('cats', S.cats);
   const saveSettings = () => DB.kvSet('settings', S.settings);
   const saveStats = () => DB.kvSet('stats', S.stats);
+  const saveDaily = () => DB.kvSet('daily', S.daily).catch(() => {});
+  function cleanDaily(d) {
+    if (!d || typeof d.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(d.day) || !Array.isArray(d.ids)) return null;
+    const done = {};
+    for (const ch of Object.keys(d.done || {})) {
+      const o = {};
+      for (const k of ['write', 'kun', 'on']) if (typeof d.done[ch][k] === 'boolean') o[k] = d.done[ch][k];
+      done[ch] = o;
+    }
+    return { day: d.day, ids: d.ids.map(String), done };
+  }
 
   /* Журнал занятий по дням: сколько ответов и сколько из них верных (в целом и по режимам). */
   function logActivity(mode, ok) {
@@ -952,6 +964,7 @@ const App = (function () {
     S.cats = Array.isArray(data.cats) ? data.cats.filter(k => k && k.id && k.name).map(k => ({ id: String(k.id), name: String(k.name) })) : [];
     S.settings = Object.assign({}, DEFAULTS, data.settings || {});
     S.stats = cleanStats(data.stats);
+    S.daily = null;
     S.nextOrder = cards.reduce((m, c) => Math.max(m, c.order), 0) + 1;
     await DB.putCards(cards); await saveCats(); await saveSettings(); await saveStats();
     applySettings(); S.filter = { q: '', level: '', cat: '', study: false, learned: false };
@@ -974,6 +987,7 @@ const App = (function () {
       h('div', { class: 'card' }, h('h3', {}, 'Заучивание'),
         h('div', { class: 'row' }, h('span', { class: 't' }, 'Проверка письма', h('small', {}, 'Насколько точно должны совпасть черты')), sel('strict', [['soft', 'Мягкая'], ['medium', 'Средняя'], ['strict', 'Строгая']])),
         h('div', { class: 'row' }, h('span', { class: 't' }, 'Карточек за занятие'), sel('session', [[10, '10'], [20, '20'], [30, '30'], [50, '50']])),
+        h('div', { class: 'row' }, h('span', { class: 't' }, 'Кандзи дня', h('small', {}, 'Сколько кандзи выбирать на день (с упором на трудные)')), sel('dailyCount', [[3, '3'], [5, '5'], [8, '8'], [10, '10']])),
         h('div', { class: 'row' }, h('span', { class: 't' }, 'Только то, что пора повторить', h('small', {}, 'Новые карточки и те, у которых подошёл срок. Выключите, чтобы заниматься всем подряд')),
           h('span', { class: 'switch' }, h('input', { type: 'checkbox', checked: st.onlyDue, onchange: e => { st.onlyDue = e.target.checked; saveSettings(); } })))),
       h('div', { class: 'card' }, h('h3', {}, 'Резервная копия'),
@@ -991,7 +1005,7 @@ const App = (function () {
         } }, 'Догрузить недостающие начертания') : null,
         h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn danger small', onclick: async () => {
           if (!(await confirmSheet('Стереть все кандзи, категории и прогресс на этом устройстве? Это нельзя отменить. Сначала сохраните копию.', 'Стереть всё', true))) return;
-          await DB.clearAll(); S.cards = new Map(); S.cats = []; S.stats = { days: {} }; S.nextOrder = 1; S.filter = { q: '', level: '', cat: '', study: false, learned: false };
+          await DB.clearAll(); S.cards = new Map(); S.cats = []; S.stats = { days: {} }; S.daily = null; S.nextOrder = 1; S.filter = { q: '', level: '', cat: '', study: false, learned: false };
           S.settings = Object.assign({}, DEFAULTS);
           await saveSettings(); applySettings(); toast('Всё стёрто'); refresh();
         } }, 'Стереть все данные'))),
@@ -1004,11 +1018,12 @@ const App = (function () {
   async function init() {
     await DB.open();
     try {
-      const [cards, cats, settings, stats] = await Promise.all([DB.allCards(), DB.kvGet('cats'), DB.kvGet('settings'), DB.kvGet('stats')]);
+      const [cards, cats, settings, stats, daily] = await Promise.all([DB.allCards(), DB.kvGet('cats'), DB.kvGet('settings'), DB.kvGet('stats'), DB.kvGet('daily')]);
       (cards || []).map(normalizeCard).filter(Boolean).forEach(c => S.cards.set(c.ch, c));
       S.cats = Array.isArray(cats) ? cats : [];
       Object.assign(S.settings, settings || {});
       S.stats = cleanStats(stats);
+      S.daily = cleanDaily(daily);
     } catch (e) { toast('Не удалось прочитать данные'); }
     S.nextOrder = Array.from(S.cards.values()).reduce((m, c) => Math.max(m, c.order), 0) + 1;
     applySettings();
@@ -1021,6 +1036,6 @@ const App = (function () {
 
   return {
     S, h, ICON, LOGO, LEVELS, init, toast, sheet, confirmSheet, pickSheet, openScreen, closeScreen, bar, saveCard, meaning,
-    strokeSvg, readingChip, openDetail, showTab, refresh, catName, plural, pool, logActivity, fixActivity
+    strokeSvg, readingChip, openDetail, showTab, refresh, catName, plural, pool, logActivity, fixActivity, saveDaily
   };
 })();
